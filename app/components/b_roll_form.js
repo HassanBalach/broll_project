@@ -5,7 +5,6 @@ import { createClient } from '@/app/utils/supabase/client'
 
 const supabase = createClient()
 
-// Helper function to extract text from PDF
 const extractTextFromPDF = async (file) => {
   try {
     console.log('PDF file:', file.name)
@@ -32,26 +31,19 @@ export default function BRollForm() {
     setLoading(true)
 
     try {
-      // Validate title
       if (!title.trim()) {
         setMessage('❌ Title is required.')
         setLoading(false)
         return
       }
 
-      // Check if user is authenticated
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser()
-
+      const { data: { user }, error: userError } = await supabase.auth.getUser()
       if (userError || !user) {
         setMessage('❌ You must be logged in to submit a post.')
         setLoading(false)
         return
       }
 
-      // Ensure profile exists (create if it doesn't)
       const { data: profileData, error: profileError } = await supabase
         .from('profiles')
         .select('id')
@@ -59,17 +51,9 @@ export default function BRollForm() {
         .single()
 
       if (!profileData && profileError?.code === 'PGRST116') {
-        // Profile doesn't exist, create it
         const { error: createProfileError } = await supabase
           .from('profiles')
-          .insert([
-            {
-              id: user.id,
-              email: user.email,
-              created_at: new Date().toISOString()
-            }
-          ])
-
+          .insert([{ id: user.id, email: user.email, created_at: new Date().toISOString() }])
         if (createProfileError) {
           setMessage(`❌ Error creating profile: ${createProfileError.message}`)
           setLoading(false)
@@ -83,7 +67,6 @@ export default function BRollForm() {
 
       let finalDescription = description
 
-      // If no description but file is provided, extract text from PDF
       if (!description.trim() && file) {
         finalDescription = await extractTextFromPDF(file)
         if (!finalDescription) {
@@ -93,40 +76,29 @@ export default function BRollForm() {
         }
       }
 
-      // Validate that we have either description or PDF content
       if (!finalDescription.trim()) {
         setMessage('❌ Description or valid PDF is required.')
         setLoading(false)
         return
       }
 
-      // Insert data into projects table
       const { data, error } = await supabase
         .from('projects')
-        .insert([
-          {
-            user_id: user.id,
-            title: title.trim(),
-            vsl_content: finalDescription.trim(),
-          },
-        ])
+        .insert([{ user_id: user.id, title: title.trim(), vsl_content: finalDescription.trim() }])
         .select()
 
       if (error) {
         console.error('Supabase error:', error)
         setMessage(`❌ Error: ${error.message}`)
       } else {
-        // Store the project ID
         const insertedProjectId = data[0]?.id
         setProjectId(insertedProjectId)
         console.log('Project created with ID:', insertedProjectId)
         
         setMessage(`✅ Post submitted successfully! Project ID: ${insertedProjectId}`)
         
-        // Generate B-roll prompts
-        await generateBrollPrompts(finalDescription)
+        await generateBrollPrompts(finalDescription, insertedProjectId)
         
-        // Reset form
         setTitle('')
         setDescription('')
         setFile(null)
@@ -150,26 +122,43 @@ export default function BRollForm() {
     }
   }
 
-  const generateBrollPrompts = async (scriptContent) => {
+  const generateBrollPrompts = async (scriptContent, projectId) => {
     setGeneratingBroll(true)
     try {
       const response = await fetch('/api/generate-broll', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          script: scriptContent
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ script: scriptContent })
       })
 
-      console.log({response})
+      if (!response.ok) {
+        const text = await response.text();
+        console.error('Raw response:', text);
+        throw new Error(`HTTP error! status: ${response.status}, body: ${text}`);
+      }
 
       const result = await response.json()
 
       if (result.success) {
         setBrollPrompts(result.brollPrompts)
         setMessage(prev => prev + ` 🎬 Generated ${result.promptCount} B-roll prompts!`)
+
+        const { error } = await supabase.from('prompts').insert(
+          result.brollPrompts.map((prompt, index) => ({
+            project_id: projectId,
+            prompt_text: prompt.prompt,
+            script_reference: prompt.scriptReference,
+            order_index: index + 1 // Set order based on array position (1-10)
+          }))
+        );
+
+        if (error) {
+          console.error('Error inserting prompts:', error);
+          setMessage(prev => prev + ` ⚠️ Failed to save prompts: ${error.message}`);
+        } else {
+          console.log('Prompts saved successfully for project ID:', projectId);
+          setMessage(prev => prev + ` ✅ Prompts saved to Supabase!`);
+        }
       } else {
         console.error('B-roll generation error:', result.error)
         setMessage(prev => prev + ` ⚠️ B-roll generation failed: ${result.error}`)
@@ -249,7 +238,6 @@ export default function BRollForm() {
         )}
       </form>
 
-      {/* B-roll Prompts Display */}
       {brollPrompts.length > 0 && (
         <div className="mt-8 p-4 border rounded shadow-sm bg-gray-50">
           <h2 className="text-lg font-semibold mb-4 text-gray-800">Generated B-Roll Prompts</h2>
